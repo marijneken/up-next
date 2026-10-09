@@ -1,0 +1,47 @@
+import json
+main_data = {"media_player": "Apple TV", "subscriptions": "My streaming services", "announce_entity": "Speaker for announcements", "country": "Country (for streaming availability)", "language": "Language (for titles)"}
+main_desc = {"subscriptions": "Episodes only play on services you tick here. Change this when your subscriptions change.", "country": "Two-letter code, e.g. NL.", "announce_entity": "An Alexa Media player, e.g. your living room Echo. It says when there's no new episode, when it skips a show, and when a finale is coming."}
+errors = {"no_remote": "This Apple TV has no remote entity. Enable its remote entity in Home Assistant first.", "no_subscriptions": "Pick at least one streaming service."}
+progress = {"description": "{title} streams on: {where}.", "data": {"start": "Where are you?"}}
+s = {
+ "config": {
+  "step": {"user": {"title": "Up Next", "description": "Pick the Apple TV to play on and the streaming services you have.", "data": main_data, "data_description": main_desc}},
+  "error": errors,
+  "abort": {"single_instance_allowed": "Up Next is already set up. Add shows from its page."}
+ },
+ "options": {"step": {"init": {"title": "Up Next", "data": main_data, "data_description": main_desc}}, "error": errors},
+ "config_subentries": {"show": {
+   "entry_type": "Show", "initiate_flow": {"user": "Add show", "reconfigure": "Change where you are"},
+   "step": {
+     "user": {"title": "Add a show", "description": "Search for a TV show. New shows go to the bottom of the queue; reorder them in the Up Next panel in the sidebar.", "data": {"query": "Show title"}},
+     "pick": {"title": "Which one?", "data": {"result": "Show"}},
+     "progress": {"title": "Where are you in {title}?", **progress},
+     "reconfigure": {"title": "Where are you in {title}?", **progress},
+     "episode": {"title": "Next episode of {title}", "description": "Pick the episode you want to watch next.", "data": {"next_episode": "Next episode"}}
+   },
+   "error": {"cannot_connect": "Couldn't reach the show catalog. Try again.", "no_results": "No shows found."},
+   "abort": {"already_added": "That show is already in your queue.", "cannot_connect": "Couldn't reach the show catalog. Try again.", "reconfigure_successful": "Updated."}
+ }},
+ "selector": {"start": {"options": {
+   "beginning": "Haven't started: begin at S1E1",
+   "caught_up": "I'm caught up: wait for the next new episode",
+   "season_start": "Start the newest season from its first episode",
+   "latest": "Play the latest released episode next",
+   "custom": "A specific episode…"}}},
+ "entity": {
+   "button": {"play_up_next": {"name": "Play next episode"}, "play_secondary": {"name": "Play secondary show"}},
+   "sensor": {"up_next": {"name": "Up next"}, "up_next_secondary": {"name": "Up next (secondary)"}}
+ },
+ "services": {
+   "play": {"name": "Play next episode", "description": "Play the next episode: of the given show, or of the highest-priority show in the queue that has a new one.", "fields": {"show": {"name": "Show", "description": "Show title; leave empty to walk the queue."}, "list": {"name": "List", "description": "Which list to walk when no show is given: main or secondary."}}},
+   "set_next_episode": {"name": "Set next episode", "description": "Choose which episode of a show plays next.", "fields": {"show": {"name": "Show", "description": "Show title."}, "season": {"name": "Season", "description": "Season number."}, "episode": {"name": "Episode", "description": "Episode number."}}},
+   "mark_watched": {"name": "Mark watched", "description": "Mark a show's next episode as watched.", "fields": {"show": {"name": "Show", "description": "Show title."}}},
+   "refresh": {"name": "Refresh", "description": "Re-fetch episode lists and air dates."}
+ }
+}
+# Run from anywhere: writes next to the integration.
+from pathlib import Path
+_dir = Path(__file__).resolve().parents[1] / "custom_components" / "up_next"
+for target in (_dir / "strings.json", _dir / "translations" / "en.json"):
+    with open(target, "w") as f:
+        json.dump(s, f, indent=2, ensure_ascii=False)

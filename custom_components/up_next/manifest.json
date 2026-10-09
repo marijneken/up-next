@@ -1,0 +1,24 @@
+{
+  "domain": "up_next",
+  "name": "Up Next",
+  "after_dependencies": [
+    "apple_tv",
+    "frontend",
+    "panel_custom"
+  ],
+  "codeowners": [
+    "@marijneken"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/marijneken/up-next",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/marijneken/up-next/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.5.5",
+  "dependencies": [
+    "http",
+    "websocket_api"
+  ]
+}

@@ -1,0 +1,42 @@
+play:
+  fields:
+    show:
+      example: Ted Lasso
+      selector:
+        text:
+    list:
+      default: main
+      selector:
+        select:
+          options:
+            - main
+            - secondary
+set_next_episode:
+  fields:
+    show:
+      required: true
+      example: Ted Lasso
+      selector:
+        text:
+    season:
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 99
+          mode: box
+    episode:
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 999
+          mode: box
+mark_watched:
+  fields:
+    show:
+      required: true
+      example: Ted Lasso
+      selector:
+        text:
+refresh:
