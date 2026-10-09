@@ -1,0 +1,33 @@
+name: Release
+
+# Bumping "version" in manifest.json on main publishes a GitHub release (and the
+# vX.Y.Z tag) for it, so HACS shows that version and offers it as an update.
+# Idempotent: nothing happens when the release already exists.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - custom_components/up_next/manifest.json
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Publish release for the manifest version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python3 -c "import json;print(json.load(open('custom_components/up_next/manifest.json'))['version'])")
+          tag="v$version"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists"
+            exit 0
+          fi
+          gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --generate-notes
