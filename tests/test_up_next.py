@@ -605,6 +605,25 @@ async def test_netflix_counts_playing_time(hass: HomeAssistant, atv, freezer) ->
     assert show.in_progress == (1, 2)  # autoplay carries on to the next one
 
 
+async def test_netflix_volume_learned_without_state_changes(
+    hass: HomeAssistant, atv, freezer
+) -> None:
+    """Netflix sends one state change at the start and then nothing: learn on the tick."""
+    entry = await setup(hass, [sub("Silo", "ts2", [1, 0])])
+    show = tracker(entry, "Silo")
+    mgr = entry.runtime_data
+    show._set(in_progress=(1, 1), started_at=dt_util.utcnow(), service="netflix")
+    mgr.last_started = show.subentry_id
+    hass.states.async_set("media_player.atv", "playing",
+                          {"app_id": "com.netflix.Netflix", "volume_level": 0.27})
+    await hass.async_block_till_done()
+    mgr._tick(dt_util.utcnow())
+    assert show.volume is None  # just started
+    freezer.tick(timedelta(minutes=11))
+    mgr._tick(dt_util.utcnow())
+    assert show.volume == 0.27
+
+
 async def test_netflix_typing_survives_flickering_focus(hass: HomeAssistant, atv) -> None:
     entry = await setup(hass, [sub("Silo", "ts2", [1, 1])])
     hass.states.async_set("binary_sensor.kb", "on")

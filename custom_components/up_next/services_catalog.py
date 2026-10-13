@@ -65,7 +65,9 @@ NETFLIX = Service(
         # (Never press select after up+left: on the profile screen that opens the
         # profile editor.)
         ("search", None),
-        ("wait", 1.5),
+        # the keyboard moves need no results yet; the ~2 s of presses before the
+        # last "right" gives the results time to load
+        ("wait", 0.3),
         # (search already pressed "down" into the keyboard, onto "123")
         # "123" -> "abc" -> letters -> "a" -> right off the grid onto the first result
         ("quick", ["left", "down"] + ["left"] * 6 + ["right"] * 6),

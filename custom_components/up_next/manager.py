@@ -61,6 +61,7 @@ BREAK_DAYS = 14
 VOLUME_FRACTION = 0.2
 # Apps that don't report a position: assume you've settled after this long.
 VOLUME_FALLBACK = timedelta(minutes=10)
+VOLUME_WAIT = 5  # seconds to wait for the Apple TV to report its volume before "quiet"
 VOLUME_AUTO = "auto"  # learn it and restore it (default)
 VOLUME_FIXED = "fixed"  # always set this volume
 VOLUME_OFF = "off"  # leave the volume alone
@@ -474,7 +475,9 @@ class ShowTracker:
         if settled and pos != 0:
             self._p["volume"] = round(float(level), 3)
             self._p["volume_ep"] = list(key)
+            _LOGGER.info("Learned volume %s for %s", self._p["volume"], self.title)
             self.manager.save()
+            self.manager.notify()
 
 
 def _norm(text: str) -> str:
@@ -797,6 +800,22 @@ class UpNextManager:
     def _tick(self, _now: datetime) -> None:
         if self._stop_clock(restart=True):
             self.notify()
+        self._learn_volumes()
+
+    @callback
+    def _learn_volumes(self) -> None:
+        """Volume learning can't wait for a state change: Netflix sends none mid-episode."""
+        st = self.hass.states.get(self.media_player)
+        if st is None or st.state != "playing":
+            return
+        attrs = dict(st.attributes)
+        pos, dur = attrs.get("media_position"), attrs.get("media_duration")
+        since = attrs.get("media_position_updated_at")
+        if pos is not None and isinstance(since, datetime):
+            pos = pos + (dt_util.utcnow() - since).total_seconds()
+        for show in self.shows.values():
+            if show.seen and show.volume_mode == VOLUME_AUTO:
+                show._learn_volume(show.seen, attrs, pos, dur)
 
     # ---- playing --------------------------------------------------------
     async def _fresh(self, shows: list[ShowTracker]) -> None:
@@ -940,10 +959,12 @@ class UpNextManager:
 
     async def _step(self, action: str, value: Any, url: str, title: str, volume: float | None) -> None:
         if action == "quiet":
-            st = self.hass.states.get(self.media_player)
-            level = st.attributes.get("volume_level") if st else None
-            if level is not None:
-                self._quiet_from = float(level)
+            level = await self._current_volume()
+            if level is None:
+                _LOGGER.warning("The Apple TV reports no volume; can't turn it down for the launch")
+            else:
+                _LOGGER.info("Quiet launch: volume %s -> 0", level)
+                self._quiet_from = level
                 await self._set_volume(0)
         elif action == "loud":
             target = volume if volume is not None else self._quiet_from
@@ -982,6 +1003,15 @@ class UpNextManager:
                 await self._set_volume(level)
             except HomeAssistantError:
                 pass
+
+    async def _current_volume(self) -> float | None:
+        """The Apple TV's volume; just after waking it can take a moment to report one."""
+        for _ in range(VOLUME_WAIT * 4):
+            st = self.hass.states.get(self.media_player)
+            if st and (level := st.attributes.get("volume_level")) is not None:
+                return float(level)
+            await asyncio.sleep(0.25)
+        return None
 
     async def _set_volume(self, level: float) -> None:
         try:
@@ -1059,7 +1089,7 @@ class UpNextManager:
         raise HomeAssistantError("Netflix never showed its search field")
 
     async def _try_type(self, entry_id: str, text: str) -> bool:
-        """Set the text; again a second later (catches a field that wasn't ready)."""
+        """Set the text; again a moment later (catches a field that wasn't ready)."""
         try:
             await self.hass.services.async_call(
                 "apple_tv", "set_keyboard_text", {"config_entry_id": entry_id, "text": text},
@@ -1068,7 +1098,7 @@ class UpNextManager:
         except HomeAssistantError as err:  # focus flickered away between check and call
             _LOGGER.debug("Typing failed: %s", err)
             return False
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
         try:
             await self.hass.services.async_call(
                 "apple_tv", "set_keyboard_text", {"config_entry_id": entry_id, "text": text},

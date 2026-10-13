@@ -16,7 +16,7 @@
   "issue_tracker": "https://github.com/marijneken/up-next/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.5.5",
+  "version": "0.5.6",
   "dependencies": [
     "http",
     "websocket_api"
