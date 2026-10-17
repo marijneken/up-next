@@ -14,7 +14,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from custom_components.up_next.api import Episode, SearchResult, ShowData
+from custom_components.up_next.api import CatalogError, Episode, SearchResult, ShowData
 from custom_components.up_next.const import DOMAIN
 
 NOW = dt_util.utcnow()
@@ -414,6 +414,41 @@ async def test_tvmaze_end_date_marks_finale() -> None:
     await cat._merge_tvmaze(show, "tt1")
     assert show.finale(show.find(4, 10)) == "season"
     assert show.finale(show.find(4, 9)) is None
+
+
+async def test_search_falls_back_to_bigger_catalog() -> None:
+    """A show JustWatch NL search misses is found via US, if it streams in NL."""
+    from custom_components.up_next.api import Catalog
+
+    def node(jw, title, pkgs):  # noqa: ANN001
+        offers = [{"monetizationType": "FLATRATE", "package": {"technicalName": p, "clearName": p}}
+                  for p in pkgs]
+        return {"node": {"id": jw, "objectType": "SHOW", "offers": offers,
+                         "content": {"title": title, "originalReleaseYear": 2026}}}
+
+    replies = {
+        "NL": [node("ts1", "Scaredy Cats", ["netflix"])],
+        "US": [node("ts2", "Alley Cats", ["netflix"]), node("ts1", "Scaredy Cats", ["netflix"]),
+               node("ts3", "US only", [])],
+    }
+    cat = Catalog(None, "NL", "en")
+    calls = []
+
+    async def fake(query, variables):  # noqa: ANN001
+        calls.append(variables["searchCountry"])
+        return {"popularTitles": {"edges": replies[variables["searchCountry"]]}}
+
+    cat._jw = fake
+    assert [r.title for r in await cat.search("alley cats")] == ["Scaredy Cats", "Alley Cats"]
+    assert sorted(calls) == ["NL", "US"]
+
+    async def us_down(query, variables):  # noqa: ANN001
+        if variables["searchCountry"] == "US":
+            raise CatalogError("down")
+        return await fake(query, variables)
+
+    cat._jw = us_down
+    assert [r.title for r in await cat.search("alley cats")] == ["Scaredy Cats"]
 
 
 async def test_break_hides_and_comeback_notifies(hass: HomeAssistant, atv, hass_ws_client) -> None:

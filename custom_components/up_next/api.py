@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
@@ -20,8 +21,8 @@ TIMEOUT = aiohttp.ClientTimeout(total=25)
 _DROP_PARAMS = {"at", "ct", "itscg", "itsct", "utm_source", "utm_medium", "utm_campaign"}
 
 _SEARCH_QUERY = """
-query Search($country: Country!, $language: Language!, $filter: TitleFilter) {
-  popularTitles(country: $country, first: 8, filter: $filter) {
+query Search($country: Country!, $searchCountry: Country!, $language: Language!, $filter: TitleFilter) {
+  popularTitles(country: $searchCountry, first: 8, filter: $filter) {
     edges { node {
       id objectType
       content(country: $country, language: $language) {
@@ -61,6 +62,11 @@ query Show($id: ID!, $country: Country!, $language: Language!) {
 """
 
 _PAID = {"FLATRATE", "FREE", "ADS", "FLATRATE_AND_BUY"}
+
+# JustWatch sometimes leaves a new show out of a country's search for weeks while
+# already listing its offers there (Alley Cats in NL). A second search in a big
+# catalog finds it; titles and offers still come from the user's country.
+_FALLBACK_SEARCH = ("US", "GB")
 
 
 class CatalogError(Exception):
@@ -203,7 +209,25 @@ class Catalog:
         return data.get("data") or {}
 
     async def search(self, text: str) -> list[SearchResult]:
-        data = await self._jw(_SEARCH_QUERY, {"filter": {"searchQuery": text}})
+        fallback = next(c for c in _FALLBACK_SEARCH if c != self.country)
+        local, extra = await asyncio.gather(
+            self._search_in(self.country, text),
+            self._search_in(fallback, text),
+            return_exceptions=True,
+        )
+        if isinstance(local, BaseException):
+            raise local
+        if isinstance(extra, BaseException):
+            _LOGGER.debug("Fallback search in %s failed: %s", fallback, extra)
+            return local
+        seen = {r.jw_id for r in local}
+        # Only shows that stream here; the rest would be noise.
+        return local + [r for r in extra if r.jw_id not in seen and r.services]
+
+    async def _search_in(self, search_country: str, text: str) -> list[SearchResult]:
+        data = await self._jw(
+            _SEARCH_QUERY, {"searchCountry": search_country, "filter": {"searchQuery": text}}
+        )
         results: list[SearchResult] = []
         for edge in (data.get("popularTitles") or {}).get("edges", []):
             node = edge["node"]
