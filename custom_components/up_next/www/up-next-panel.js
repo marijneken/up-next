@@ -49,6 +49,11 @@ const fmtDay = (iso) => {
   return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
 };
 
+// Where "Settings" goes. Home Assistant has no link that opens an integration's settings dialog, so
+// this opens the integration page with our entry highlighted: Configure is one click away.
+const settingsPath = (entryId) =>
+  "/config/integrations/integration/up_next" + (entryId ? `#config_entry=${encodeURIComponent(entryId)}` : "");
+
 class UpNextPanel extends HTMLElement {
   constructor() {
     super();
@@ -127,6 +132,9 @@ class UpNextPanel extends HTMLElement {
       <div class="toolbar">
         ${this._narrow ? `<ha-menu-button></ha-menu-button>` : ""}
         <div class="title">Up Next</div>
+        ${this._hass && this._hass.user && this._hass.user.is_admin
+          ? `<button class="settings" data-act="settings" title="Open the Up Next integration to change its settings (Apple TV, subscriptions, announcements)"><ha-icon icon="mdi:cog"></ha-icon><span>Settings</span></button>`
+          : ""}
       </div>
       <div class="content">
         ${!d.ready
@@ -459,11 +467,19 @@ class UpNextPanel extends HTMLElement {
         this._render();
       } else if (act === "add-save") {
         await this._add();
+      } else if (act === "settings") {
+        this._openSettings();
       }
     } catch (e) {
       this._busy[id] = false;
       this._say(e.message || String(e));
     }
+  }
+
+  _openSettings() {
+    // The same thing Home Assistant's own navigation does: change the URL and tell the frontend.
+    history.pushState(null, "", settingsPath(this._data.entry_id));
+    window.dispatchEvent(new CustomEvent("location-changed", { detail: { replace: false }, bubbles: true, composed: true }));
   }
 
   _closeEditor() {
@@ -613,7 +629,11 @@ const STYLE = `
   .toolbar { display:flex; align-items:center; height:56px; padding:0 12px; gap:8px;
              background: var(--app-header-background-color, var(--primary-color)); color: var(--app-header-text-color, #fff);
              border-bottom: 1px solid var(--divider-color); }
-  .title { font-size:20px; font-weight:400; margin-left:4px; }
+  .title { font-size:20px; font-weight:400; margin-left:4px; flex:1; }
+  button.settings { background: rgba(255,255,255,.16); color: inherit; border-color: transparent; padding: 5px 12px 5px 8px; font-size: 14px; }
+  button.settings:hover:not(:disabled) { background: rgba(255,255,255,.28); border-color: transparent; }
+  button.settings ha-icon { --mdc-icon-size: 18px; }
+  @media (max-width: 700px) { button.settings span { display: none; } button.settings { padding: 6px; } }
   .content { max-width: 900px; margin: 0 auto; padding: 16px; box-sizing:border-box; }
   .lane { margin-bottom: 28px; }
   button { font: inherit; border-radius: 18px; border: 1px solid var(--divider-color); background: var(--card-background-color);

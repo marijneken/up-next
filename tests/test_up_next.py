@@ -136,6 +136,7 @@ async def test_panel_websocket(hass: HomeAssistant, atv, hass_ws_client) -> None
     await ws.send_json({"id": 1, "type": "up_next/subscribe"})
     assert (await ws.receive_json())["success"]
     snap = (await ws.receive_json())["event"]
+    assert snap["entry_id"] == entry.entry_id  # for the Settings button
     assert [s["title"] for s in snap["shows"]] == ["Ted Lasso", "Silo"]
     assert snap["shows"][0]["mode"] == "latest" and snap["shows"][0]["playable"]
     silo_id = snap["shows"][1]["id"]

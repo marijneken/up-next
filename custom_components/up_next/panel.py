@@ -135,6 +135,7 @@ def _snapshot(hass: HomeAssistant) -> dict[str, Any]:
     secondary = mgr.up_next("secondary")
     return {
         "ready": True,
+        "entry_id": mgr.entry.entry_id,
         "shows": [_show_dict(s) for s in mgr.queue],
         "up_next": main[0].subentry_id if main else None,
         "up_next_secondary": secondary[0].subentry_id if secondary else None,
