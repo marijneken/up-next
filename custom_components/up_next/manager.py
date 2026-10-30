@@ -57,15 +57,7 @@ STORE_VERSION = 1
 SESSION_WINDOW = timedelta(hours=4)
 # A show with nothing out and nothing due within this many days is "on a break".
 BREAK_DAYS = 14
-# Learn the volume once you're this far into an episode (you've settled on it by then).
-VOLUME_FRACTION = 0.2
-# Apps that don't report a position: assume you've settled after this long.
-VOLUME_FALLBACK = timedelta(minutes=10)
-VOLUME_WAIT = 5  # seconds to wait for the Apple TV to report its volume before "quiet"
-VOLUME_AUTO = "auto"  # learn it and restore it (default)
-VOLUME_FIXED = "fixed"  # always set this volume
-VOLUME_OFF = "off"  # leave the volume alone
-VOLUME_MODES = (VOLUME_AUTO, VOLUME_FIXED, VOLUME_OFF)
+WAKE_SETTLE = 3  # seconds after waking the Apple TV (home screen + TV input switch)
 # Apps that report nothing (Netflix): count playing time against the episode's length.
 DEFAULT_RUNTIME = 45  # minutes, when the catalog doesn't know
 STEP_TIMEOUT = 25  # seconds; a stuck Apple TV call must not block the play button forever
@@ -156,15 +148,6 @@ class ShowTracker:
     def hold(self) -> str | None:
         """None (play normally), 'manual' (skip) or 'auto' (start on a planned day)."""
         return self._p.get("hold")
-
-    @property
-    def volume_mode(self) -> str:
-        return self._p.get("volume_mode", VOLUME_AUTO)
-
-    @property
-    def volume(self) -> float | None:
-        """Learned (auto) or chosen (fixed) volume, 0..1."""
-        return self._p.get("volume")
 
     def on_break(self, now: datetime | None = None) -> bool:
         """Nothing to watch and nothing due soon: hidden from the list and announcements."""
@@ -454,30 +437,11 @@ class ShowTracker:
                 self._set(in_progress=key, started_at=dt_util.utcnow())
                 changed = True
         pos, dur = attrs.get("media_position"), attrs.get("media_duration")
-        if playing and self.volume_mode == VOLUME_AUTO:
-            self._learn_volume(key, attrs, pos, dur)
         if pos and dur and dur > 0 and pos / dur >= WATCHED_FRACTION:
             if self.last_watched != key:
                 self.mark_watched(key)
                 changed = True
         return changed
-
-    def _learn_volume(self, key: tuple[int, int], attrs: dict[str, Any], pos: Any, dur: Any) -> None:
-        """Remember the volume once per episode, 20% in."""
-        level = attrs.get("volume_level")
-        if level is None or attrs.get("is_volume_muted") or list(key) == self._p.get("volume_ep"):
-            return
-        if pos and dur and dur > 0:
-            settled = pos / dur >= VOLUME_FRACTION
-        else:
-            started = self.started_at
-            settled = bool(started and dt_util.utcnow() - started >= VOLUME_FALLBACK)
-        if settled and pos != 0:
-            self._p["volume"] = round(float(level), 3)
-            self._p["volume_ep"] = list(key)
-            _LOGGER.info("Learned volume %s for %s", self._p["volume"], self.title)
-            self.manager.save()
-            self.manager.notify()
 
 
 def _norm(text: str) -> str:
@@ -521,12 +485,17 @@ class UpNextManager:
         self.signature: str = ""
         self.plans: dict[str, Plan] = {}
         self._clock: tuple[str, datetime] | None = None  # (show, playing since) for blind apps
-        self._quiet_from: float | None = None  # volume before a "quiet" launch phase
+        self.volumes: dict[str, float] = {}  # service -> volume (0..1)
+        self._quiet_to: float | None = None  # volume to go back to after a "quiet" launch phase
 
     async def async_setup(self) -> None:
         stored = await self._store.async_load() or {}
         self.progress = stored.get("progress", {})
         self.last_started = stored.get("last_started")
+        self.volumes = {k: v for k, v in stored.get("volumes", {}).items() if k in SERVICES}
+        for p in self.progress.values():  # <= 0.5.7: per-show volume learning
+            for old in ("volume", "volume_mode", "volume_ep"):
+                p.pop(old, None)
         for sub in self.entry.subentries.values():
             if sub.subentry_type == SUBENTRY_SHOW:
                 self.shows[sub.subentry_id] = ShowTracker(self, sub.subentry_id, dict(sub.data))
@@ -571,7 +540,12 @@ class UpNextManager:
         await self._store.async_save(self._data())
 
     def _data(self) -> dict[str, Any]:
-        return {"progress": self.progress, "order": self.order, "last_started": self.last_started}
+        return {
+            "progress": self.progress,
+            "order": self.order,
+            "last_started": self.last_started,
+            "volumes": self.volumes,
+        }
 
     async def async_save_now(self) -> None:
         await self._store.async_save(self._data())
@@ -633,19 +607,14 @@ class UpNextManager:
             self.save()
         return out
 
-    def set_volume(self, show: ShowTracker, mode: str, volume: float | None = None) -> None:
-        show._p["volume_mode"] = mode
-        if volume is not None:
-            show._p["volume"] = round(max(0.0, min(1.0, float(volume))), 3)
-            show._p.pop("volume_ep", None)
+    def set_service_volume(self, service: str, volume: float | None) -> None:
+        """Volume (0..1) for one streaming service (None: leave the volume alone)."""
+        if volume is None:
+            self.volumes.pop(service, None)
+        else:
+            self.volumes[service] = round(max(0.0, min(1.0, float(volume))), 3)
         self.save()
         self.notify()
-
-    @staticmethod
-    def _target_volume(show: ShowTracker) -> float | None:
-        if show.volume_mode == VOLUME_OFF:
-            return None
-        return show.volume
 
     async def async_refresh_all(self) -> None:
         await asyncio.gather(*(s.refresh(force=True) for s in self.shows.values()))
@@ -800,22 +769,6 @@ class UpNextManager:
     def _tick(self, _now: datetime) -> None:
         if self._stop_clock(restart=True):
             self.notify()
-        self._learn_volumes()
-
-    @callback
-    def _learn_volumes(self) -> None:
-        """Volume learning can't wait for a state change: Netflix sends none mid-episode."""
-        st = self.hass.states.get(self.media_player)
-        if st is None or st.state != "playing":
-            return
-        attrs = dict(st.attributes)
-        pos, dur = attrs.get("media_position"), attrs.get("media_duration")
-        since = attrs.get("media_position_updated_at")
-        if pos is not None and isinstance(since, datetime):
-            pos = pos + (dt_util.utcnow() - since).total_seconds()
-        for show in self.shows.values():
-            if show.seen and show.volume_mode == VOLUME_AUTO:
-                show._learn_volume(show.seen, attrs, pos, dur)
 
     # ---- playing --------------------------------------------------------
     async def _fresh(self, shows: list[ShowTracker]) -> None:
@@ -867,7 +820,7 @@ class UpNextManager:
         notes.extend(self._take_comebacks())
         if skipped:
             names = ", ".join(s.title for s in skipped)
-            notes.append(f"No new episode of {names}. Playing {show.title}.")
+            notes.append(f"No new episode of {names}.")
         if show.hold == HOLD_AUTO:
             show._p["auto_season"] = nxt.episode.season  # keeps it active until the finale
         if show.hold == HOLD_AUTO and show._p.get("auto_announced") != nxt.episode.season:
@@ -879,12 +832,13 @@ class UpNextManager:
                     f"Starting season {nxt.episode.season} of {show.title}. From here there's "
                     f"a new episode every night you get to it, finale {_day_spoken(when)}."
                 )
+        ep = nxt.episode
+        notes.append(f"Playing {show.title}, season {ep.season}, episode {ep.episode}.")
         if nxt.finale == "series":
-            notes.append(f"Heads up: this is the series finale of {show.title}.")
+            notes.append("Heads up: this is the series finale.")
         elif nxt.finale == "season":
-            notes.append(f"Heads up: this is the season {nxt.episode.season} finale.")
-        if notes:
-            await self.async_announce(" ".join(notes))
+            notes.append(f"Heads up: this is the season {ep.season} finale.")
+        await self.async_announce(" ".join(notes))
         # The session starts now, so tracking works even if you take over by hand.
         show._set(
             in_progress=nxt.episode.key,
@@ -895,7 +849,7 @@ class UpNextManager:
         self.save()
         self.notify()
         try:
-            await self._launch(nxt.service, nxt.url, show.title, self._target_volume(show))
+            await self._launch(nxt.service, nxt.url, show.title)
         except (HomeAssistantError, TimeoutError) as err:
             _LOGGER.warning("Starting %s on %s failed: %s", show.title, nxt.service.name, err)
             await self._restore_quiet()
@@ -929,48 +883,52 @@ class UpNextManager:
             parts.append("Nothing new has been announced.")
         return " ".join(parts)
 
-    async def _launch(
-        self, service: Service, url: str, title: str, volume: float | None = None
-    ) -> None:
+    async def _launch(self, service: Service, url: str, title: str) -> None:
         state = self.hass.states.get(self.media_player)
         if state is None or state.state == "unavailable":
             raise HomeAssistantError(f"{self.media_player} is unavailable")
-        if state.state in ("off", "standby"):
-            await self.hass.services.async_call(
-                "media_player", "turn_on", {ATTR_ENTITY_ID: self.media_player}, blocking=True
-            )
-            for _ in range(30):  # wait (max 15 s) until the Apple TV reports it's awake
-                await asyncio.sleep(0.5)
-                st = self.hass.states.get(self.media_player)
-                if st and st.state not in ("off", "standby"):
-                    break
-            await asyncio.sleep(3)  # home screen + TV input switch settle
-        await self.async_run_steps(service.steps, url, title, volume)
+        await self._wake(state.state)
+        await self.async_run_steps(service.steps, url, title, self.volumes.get(service.technical))
+
+    async def _wake(self, state: str) -> None:
+        """Wake the Apple TV. Always: asleep, it can still report "paused" (no power state)."""
+        try:
+            async with asyncio.timeout(STEP_TIMEOUT):
+                await self.hass.services.async_call(
+                    "media_player", "turn_on", {ATTR_ENTITY_ID: self.media_player}, blocking=True
+                )
+        except (HomeAssistantError, TimeoutError) as err:
+            _LOGGER.warning("Couldn't wake the Apple TV: %s", err)
+            return
+        if state == "playing":
+            return  # it was awake: nothing to wait for
+        for _ in range(30):  # wait (max 15 s) until the Apple TV reports it's awake
+            st = self.hass.states.get(self.media_player)
+            if st and st.state not in ("off", "standby"):
+                break
+            await asyncio.sleep(0.5)
+        await asyncio.sleep(WAKE_SETTLE)
 
     async def async_run_steps(
         self, steps: tuple, url: str, title: str, volume: float | None = None
     ) -> None:
-        self._quiet_from = None
+        self._quiet_to = None
         for action, value in steps:
             async with asyncio.timeout(SEARCH_TIMEOUT + 15 if action == "search" else STEP_TIMEOUT):
                 await self._step(action, value, url, title, volume)
-        if not any(a == "loud" for a, _ in steps) and volume is not None:
+        if volume is not None and not any(a == "loud" for a, _ in steps):
             await self._set_volume(volume)
 
     async def _step(self, action: str, value: Any, url: str, title: str, volume: float | None) -> None:
         if action == "quiet":
-            level = await self._current_volume()
-            if level is None:
-                _LOGGER.warning("The Apple TV reports no volume; can't turn it down for the launch")
-            else:
-                _LOGGER.info("Quiet launch: volume %s -> 0", level)
-                self._quiet_from = level
-                await self._set_volume(0)
+            if volume is None:
+                return  # no volume set for this service: nothing to go back to afterwards
+            self._quiet_to = volume
+            await self._set_volume(0)
         elif action == "loud":
-            target = volume if volume is not None else self._quiet_from
-            self._quiet_from = None
-            if target is not None:
-                await self._set_volume(target)
+            self._quiet_to = None
+            if volume is not None:
+                await self._set_volume(volume)
         elif action == "url":
             await self.hass.services.async_call(
                 "media_player",
@@ -997,21 +955,9 @@ class UpNextManager:
 
     async def _restore_quiet(self) -> None:
         """After a failed launch: don't leave the TV silent."""
-        if self._quiet_from is not None:
-            level, self._quiet_from = self._quiet_from, None
-            try:
-                await self._set_volume(level)
-            except HomeAssistantError:
-                pass
-
-    async def _current_volume(self) -> float | None:
-        """The Apple TV's volume; just after waking it can take a moment to report one."""
-        for _ in range(VOLUME_WAIT * 4):
-            st = self.hass.states.get(self.media_player)
-            if st and (level := st.attributes.get("volume_level")) is not None:
-                return float(level)
-            await asyncio.sleep(0.25)
-        return None
+        if self._quiet_to is not None:
+            level, self._quiet_to = self._quiet_to, None
+            await self._set_volume(level)
 
     async def _set_volume(self, level: float) -> None:
         try:

@@ -27,7 +27,6 @@ from .const import (
 )
 from .manager import (
     STATUS_AVAILABLE,
-    VOLUME_MODES,
     ShowTracker,
     UpNextManager,
     _date,
@@ -52,7 +51,7 @@ async def async_setup_panel(hass: HomeAssistant) -> None:
         return
     hass.data[f"{DOMAIN}_panel"] = True
     for cmd in (ws_subscribe, ws_move, ws_remove, ws_play, ws_search, ws_add, ws_episodes,
-                ws_set_progress, ws_set_hold, ws_set_list, ws_set_volume):
+                ws_set_progress, ws_set_hold, ws_set_list, ws_set_service_volume):
         websocket_api.async_register_command(hass, cmd)
     if hass.http is None:  # e.g. tests without a web server
         return
@@ -96,9 +95,6 @@ def _show_dict(show: ShowTracker) -> dict[str, Any]:
         "active": mgr.is_active(show),
         "hold_text": mgr.hold_text(show),
         "on_break": show.on_break(),
-        "volume_mode": show.volume_mode,
-        "volume": show.volume,
-        "volume_from": "S{:02d}E{:02d}".format(*show._p["volume_ep"]) if show._p.get("volume_ep") else None,
         "plan": {
             "start": plan.start.isoformat() if plan and plan.start else None,
             "finale": plan.finale.isoformat() if plan and plan.finale else None,
@@ -107,6 +103,7 @@ def _show_dict(show: ShowTracker) -> dict[str, Any]:
         } if plan else None,
         "title": show.title,
         "poster": show.data.poster if show.data else None,
+        "page": show.data.page if show.data else None,
         "status": nxt.status,
         "line": show.status_line(),
         "short": show.short_status() if show.data else "loading…",
@@ -142,6 +139,10 @@ def _snapshot(hass: HomeAssistant) -> dict[str, Any]:
         "up_next": main[0].subentry_id if main else None,
         "up_next_secondary": secondary[0].subentry_id if secondary else None,
         "subscriptions": [SERVICES[s].name for s in mgr.subscriptions],
+        "volumes": [
+            {"service": s, "name": SERVICES[s].name, "volume": mgr.volumes.get(s)}
+            for s in mgr.subscriptions
+        ],
     }
 
 
@@ -241,6 +242,7 @@ async def ws_search(hass: HomeAssistant, connection: websocket_api.ActiveConnect
                 "year": r.year,
                 "imdb_id": r.imdb_id,
                 "poster": r.poster,
+                "page": r.page,
                 "services": sorted(r.services.values()),
                 "mine": sorted(SERVICES[k].name for k in r.services if k in subs),
                 "added": r.jw_id in have,
@@ -298,7 +300,7 @@ def _key(value: str | None) -> tuple[int, int] | None:
         vol.Required("mode"): vol.In(MODES),
         vol.Optional("next"): vol.Any(str, None),
         vol.Optional("list", default="main"): vol.In(LIST_NAMES),
-        vol.Optional("hold", default="none"): vol.In(HOLDS),
+        vol.Optional("hold", default="auto"): vol.In(HOLDS),
     }
 )
 @websocket_api.async_response
@@ -393,19 +395,17 @@ async def ws_set_list(hass: HomeAssistant, connection: websocket_api.ActiveConne
 
 @websocket_api.websocket_command(
     {
-        vol.Required("type"): "up_next/set_volume",
-        vol.Required("show_id"): str,
-        vol.Required("mode"): vol.In(VOLUME_MODES),
-        vol.Optional("volume"): vol.All(vol.Coerce(float), vol.Range(min=0, max=1)),
+        vol.Required("type"): "up_next/set_service_volume",
+        vol.Required("service"): vol.In(list(SERVICES)),
+        vol.Required("volume"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0, max=1))),
     }
 )
 @websocket_api.async_response
-async def ws_set_volume(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+async def ws_set_service_volume(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
+) -> None:
     if not (mgr := _require(hass, connection, msg)):
         return
-    if (show := mgr.shows.get(msg["show_id"])) is None:
-        connection.send_error(msg["id"], "not_found", "Unknown show")
-        return
-    mgr.set_volume(show, msg["mode"], msg.get("volume"))
+    mgr.set_service_volume(msg["service"], msg["volume"])
     await mgr.async_save_now()
-    connection.send_result(msg["id"], _show_dict(show))
+    connection.send_result(msg["id"])

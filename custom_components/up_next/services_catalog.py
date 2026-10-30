@@ -13,8 +13,9 @@ Step types:
   ("text", None)         wait for a focused text field, then type the show title
   ("search", None)       cold-started Netflix: select (profile), up+left (Search
                          tab), down (keyboard), type once the field is focused
-  ("quiet", None)        turn the volume down (app start-up chimes)
-  ("loud", None)         back to the show's volume (or what it was)
+  ("quiet", None)        volume to 0 (app start-up chimes); only when the service
+                         has a volume set, since the Apple TV can't be asked for it
+  ("loud", None)         the service's volume (recipes without it get it at the end)
 """
 
 from __future__ import annotations

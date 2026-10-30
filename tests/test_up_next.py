@@ -124,6 +124,7 @@ async def test_priority_fallthrough_and_finale(hass: HomeAssistant, atv) -> None
     assert keys[0].data["command"] == ["select"]
     msg = tts[0].data["message"]
     assert "Silo" not in msg  # caught up = on a break: not mentioned
+    assert "Playing Ted Lasso, season 1, episode 3." in msg
     assert "season 1 finale" in msg
     assert tracker(entry, "Ted Lasso").in_progress == (1, 3)
 
@@ -489,38 +490,6 @@ async def test_break_hides_and_comeback_notifies(hass: HomeAssistant, atv, hass_
     assert len(tts) == 1 or "Silo is back" not in tts[-1].data["message"]
 
 
-async def test_volume_learned_and_restored(hass: HomeAssistant, atv, hass_ws_client) -> None:
-    entry = await setup(hass, [sub("Ted Lasso", "ts1", [1, 3])])
-    show = tracker(entry, "Ted Lasso")
-    attrs = {"app_id": "com.apple.TVWatchList", "media_title": "Ted Lasso", "media_content_id": "B001",
-             "media_duration": 3000, "volume_level": 0.35}
-    hass.states.async_set("media_player.atv", "playing", {**attrs, "media_position": 300})
-    await hass.async_block_till_done()
-    assert show.volume is None  # 10% in: not settled yet
-    hass.states.async_set("media_player.atv", "playing", {**attrs, "media_position": 650})
-    await hass.async_block_till_done()
-    assert show.volume == 0.35
-    hass.states.async_set("media_player.atv", "playing", {**attrs, "media_position": 900, "volume_level": 0.6})
-    await hass.async_block_till_done()
-    assert show.volume == 0.35  # once per episode
-    hass.states.async_set("media_player.atv", "idle", {})
-    vol_set = async_mock_service(hass, "media_player", "volume_set")
-    async_mock_service(hass, "media_player", "play_media")
-    async_mock_service(hass, "remote", "send_command")
-    async_mock_service(hass, "notify", "alexa_media")
-    await entry.runtime_data.async_play(show)
-    assert vol_set[0].data["volume_level"] == 0.35
-    ws = await hass_ws_client(hass)
-    await ws.send_json({"id": 1, "type": "up_next/set_volume", "show_id": show.subentry_id,
-                        "mode": "fixed", "volume": 0.5})
-    res = await ws.receive_json()
-    assert res["success"] and res["result"]["volume"] == 0.5 and res["result"]["volume_mode"] == "fixed"
-    await ws.send_json({"id": 2, "type": "up_next/set_volume", "show_id": show.subentry_id, "mode": "off"})
-    assert (await ws.receive_json())["success"]
-    await entry.runtime_data.async_play(show)
-    assert len(vol_set) == 1
-
-
 async def test_auto_start_show_with_nothing_announced(hass: HomeAssistant, atv) -> None:
     """Auto-start on a show you're caught up on (no next season yet) must not break setup."""
     entry = await setup(hass, [sub("Silo", "ts2", [1, 2])])
@@ -549,14 +518,49 @@ async def _netflix_start(hass, entry, focus="on"):  # noqa: ANN001
 async def test_netflix_quiet_launch_and_typing(hass: HomeAssistant, atv) -> None:
     entry = await setup(hass, [sub("Silo", "ts2", [1, 1])])
     calls = await _netflix_start(hass, entry)
-    levels = [c.data["volume_level"] for c in calls["vol"]]
-    assert levels == [0, 0.4]  # quiet for both app starts, back before "Play"
+    assert calls["vol"] == []  # no volume set for Netflix: leave it alone
     assert len(calls["play"]) == 2
     assert [c.data["text"] for c in calls["text"]] == ["Silo", "Silo"]
-    # the learned volume wins over the old level when it's known
-    tracker(entry, "Silo")._p["volume"] = 0.3
+    entry.runtime_data.set_service_volume("netflix", 0.3)
     calls2 = await _netflix_start(hass, entry)
+    # quiet for both app starts, the service's volume before "Play"
     assert [c.data["volume_level"] for c in calls2["vol"]] == [0, 0.3]
+
+
+async def test_service_volume_from_panel(hass: HomeAssistant, atv, hass_ws_client) -> None:
+    entry = await setup(hass, [sub("Ted Lasso", "ts1", [1, 3])])
+    ws = await hass_ws_client(hass)
+    await ws.send_json({"id": 1, "type": "up_next/set_service_volume", "service": "appletvplus",
+                        "volume": 0.45})
+    assert (await ws.receive_json())["success"]
+    await ws.send_json({"id": 2, "type": "up_next/subscribe"})
+    await ws.receive_json()
+    snap = (await ws.receive_json())["event"]
+    assert {"service": "appletvplus", "name": "Apple TV+", "volume": 0.45} in snap["volumes"]
+    vol = async_mock_service(hass, "media_player", "volume_set")
+    async_mock_service(hass, "media_player", "play_media")
+    async_mock_service(hass, "remote", "send_command")
+    async_mock_service(hass, "notify", "alexa_media")
+    await entry.runtime_data.async_play(tracker(entry, "Ted Lasso"))
+    assert [c.data["volume_level"] for c in vol] == [0.45]  # no quiet step: set at the end
+    await ws.send_json({"id": 3, "type": "up_next/set_service_volume", "service": "appletvplus",
+                        "volume": None})
+    while (res := await ws.receive_json())["id"] != 3 or res["type"] != "result":
+        pass  # queue updates from the play above
+    assert res["success"]
+    assert "appletvplus" not in entry.runtime_data.volumes
+
+
+async def test_wakes_apple_tv_that_says_paused(hass: HomeAssistant, atv) -> None:
+    """Asleep, the Apple TV can keep reporting its last state: always wake it."""
+    entry = await setup(hass, [sub("Ted Lasso", "ts1", [1, 3])])
+    hass.states.async_set("media_player.atv", "paused", {"app_id": "com.google.ios.youtube"})
+    on = async_mock_service(hass, "media_player", "turn_on")
+    async_mock_service(hass, "media_player", "play_media")
+    async_mock_service(hass, "remote", "send_command")
+    async_mock_service(hass, "notify", "alexa_media")
+    await entry.runtime_data.async_play(tracker(entry, "Ted Lasso"))
+    assert len(on) == 1
 
 
 async def test_netflix_slow_start_restarts_never_select_after_up_left(
@@ -602,7 +606,7 @@ async def test_netflix_never_shows_search_gives_up(hass: HomeAssistant, atv) -> 
 async def test_failed_launch_keeps_session_and_volume(hass: HomeAssistant, atv) -> None:
     entry = await setup(hass, [sub("Silo", "ts2", [1, 1])])
     show = tracker(entry, "Silo")
-    hass.states.async_set("media_player.atv", "idle", {"volume_level": 0.4})
+    entry.runtime_data.set_service_volume("netflix", 0.4)
     vol = async_mock_service(hass, "media_player", "volume_set")
     tts = async_mock_service(hass, "notify", "alexa_media")
 
@@ -638,25 +642,6 @@ async def test_netflix_counts_playing_time(hass: HomeAssistant, atv, freezer) ->
     mgr._tick(dt_util.utcnow())
     assert show.last_watched == (1, 1)
     assert show.in_progress == (1, 2)  # autoplay carries on to the next one
-
-
-async def test_netflix_volume_learned_without_state_changes(
-    hass: HomeAssistant, atv, freezer
-) -> None:
-    """Netflix sends one state change at the start and then nothing: learn on the tick."""
-    entry = await setup(hass, [sub("Silo", "ts2", [1, 0])])
-    show = tracker(entry, "Silo")
-    mgr = entry.runtime_data
-    show._set(in_progress=(1, 1), started_at=dt_util.utcnow(), service="netflix")
-    mgr.last_started = show.subentry_id
-    hass.states.async_set("media_player.atv", "playing",
-                          {"app_id": "com.netflix.Netflix", "volume_level": 0.27})
-    await hass.async_block_till_done()
-    mgr._tick(dt_util.utcnow())
-    assert show.volume is None  # just started
-    freezer.tick(timedelta(minutes=11))
-    mgr._tick(dt_util.utcnow())
-    assert show.volume == 0.27
 
 
 async def test_netflix_typing_survives_flickering_focus(hass: HomeAssistant, atv) -> None:

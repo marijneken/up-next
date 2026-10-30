@@ -2,10 +2,10 @@
 // Talks to the integration over the HA websocket (up_next/* commands).
 
 const MODES = [
-  ["caught_up", "I'm caught up — wait for the next new episode"],
-  ["latest", "Play the latest released episode next"],
-  ["season_start", "Start the newest season from its first episode"],
   ["beginning", "Haven't started — begin at S1E1"],
+  ["season_start", "Start the newest season from its first episode"],
+  ["latest", "Play the latest released episode next"],
+  ["caught_up", "I'm caught up — wait for the next new episode"],
   ["custom", "A specific episode…"],
 ];
 const HOLDS = [
@@ -131,7 +131,7 @@ class UpNextPanel extends HTMLElement {
       <div class="content">
         ${!d.ready
           ? `<div class="empty">${d.error ? esc(d.error) : "Up Next isn't set up yet. Add the integration first."}</div>`
-          : LISTS.map((l) => this._renderList(...l)).join("")}
+          : LISTS.map((l) => this._renderList(...l)).join("") + this._renderVolumes()}
       </div>
       ${this._toast ? `<div class="toast">${esc(this._toast)}</div>` : ""}
     `;
@@ -184,6 +184,37 @@ class UpNextPanel extends HTMLElement {
       </section>`;
   }
 
+  _renderVolumes() {
+    const vols = this._data.volumes || [];
+    if (!vols.length) return "";
+    return `
+      <section class="lane">
+        <div class="volbox">
+          <div class="hero-label">Volume per streaming service</div>
+          <div class="help">Set when Up Next starts a show. With a volume set, the sound is also off while the app starts up (no double Netflix chime).</div>
+          ${vols.map((v) => {
+            const on = v.volume != null;
+            const pct = Math.round(100 * (v.volume ?? 0.3));
+            return `<div class="vrow">
+              <span class="vname">${esc(v.name)}</span>
+              <label class="vset"><input type="checkbox" data-vol-on="${esc(v.service)}" ${on ? "checked" : ""}> Set</label>
+              ${on
+                ? `<input type="range" data-vol="${esc(v.service)}" min="0" max="100" step="1" value="${pct}"> <span class="vpct" id="vol-pct-${esc(v.service)}">${pct}%</span>`
+                : `<span class="muted0">Don't change the volume</span>`}
+            </div>`;
+          }).join("")}
+        </div>
+      </section>`;
+  }
+
+  async _setVolume(service, volume) {
+    try {
+      await this._ws({ type: "up_next/set_service_volume", service, volume });
+    } catch (e) {
+      this._say(e.message || String(e));
+    }
+  }
+
   _renderShow(s, i, nextId) {
     const n = s.next;
     const badge =
@@ -203,7 +234,7 @@ class UpNextPanel extends HTMLElement {
         <div class="row">
           <div class="grip" data-grip="${s.id}" title="Drag to reorder"><ha-icon icon="mdi:drag"></ha-icon></div>
           <div class="rank">${i + 1}</div>
-          ${s.poster ? `<img class="poster" src="${esc(s.poster)}" alt="" loading="lazy">` : `<div class="poster ph"><ha-icon icon="mdi:television-classic"></ha-icon></div>`}
+          ${this._posterLink(s.page, s.poster ? `<img class="poster" src="${esc(s.poster)}" alt="" loading="lazy">` : `<div class="poster ph"><ha-icon icon="mdi:television-classic"></ha-icon></div>`)}
           <div class="info">
             <div class="name">${esc(s.title)} ${badge}${fin}</div>
             <div class="line">${esc(s.short)}</div>
@@ -217,6 +248,10 @@ class UpNextPanel extends HTMLElement {
         </div>
         ${editing ? this._renderEditor(s) : ""}
       </div>`;
+  }
+
+  _posterLink(page, img) {
+    return page ? `<a class="plink" href="${esc(page)}" target="_blank" rel="noopener" title="About this show (JustWatch)">${img}</a>` : img;
   }
 
   _modeRadios(name, current, eps) {
@@ -244,23 +279,6 @@ class UpNextPanel extends HTMLElement {
     }).join("");
   }
 
-  _volumeRadios(s) {
-    const e = this._edit;
-    const mode = e.volume_mode ?? s.volume_mode ?? "auto";
-    const pct = Math.round(100 * (e.volume ?? s.volume ?? 0.5));
-    const learned = s.volume_mode === "auto" && s.volume != null
-      ? `Learned ${Math.round(100 * s.volume)}%${s.volume_from ? ` (during ${esc(s.volume_from)})` : ""}`
-      : "Not learned yet";
-    const opts = [
-      ["auto", "Auto", `${learned}. Picks up your volume 20% into each episode and sets it next time.`],
-      ["fixed", "Fixed", ""],
-      ["off", "Don't change", "Leave the volume as it is."],
-    ];
-    return opts.map(([k, label, help]) => `<label class="radio"><input type="radio" name="ed-vol" value="${k}" ${k === mode ? "checked" : ""}> <span><b>${label}</b>${
-      k === "fixed" ? (mode === "fixed" ? ` <input type="range" id="ed-volume" min="0" max="100" step="1" value="${pct}"> <span id="ed-volume-pct">${pct}%</span>` : "")
-        : `<br><span class="help">${help}</span>`}</span></label>`).join("");
-  }
-
   _renderEditor(s) {
     const e = this._edit;
     const eps = this._episodes[s.id];
@@ -277,8 +295,6 @@ class UpNextPanel extends HTMLElement {
           <div>
             <div class="ed-title">When to watch</div>
             ${this._holdRadios("ed-hold", e.hold ?? s.hold, s)}
-            <div class="ed-title vol-title">Volume</div>
-            ${this._volumeRadios(s)}
           </div>
         </div>
         <div class="ed-actions">
@@ -305,7 +321,7 @@ class UpNextPanel extends HTMLElement {
         ${a.busy && !p ? `<div class="muted">Searching…</div>` : ""}
         ${!p && a.results ? (a.results.length ? `<div class="results">${a.results.map((r, i) => `
           <div class="result ${r.added ? "added" : ""}" data-pick="${i}">
-            ${r.poster ? `<img class="poster sm" src="${esc(r.poster)}" alt="">` : `<div class="poster sm ph"></div>`}
+            ${this._posterLink(r.page, r.poster ? `<img class="poster sm" src="${esc(r.poster)}" alt="">` : `<div class="poster sm ph"></div>`)}
             <div class="info">
               <div class="name">${esc(r.title)} ${r.year ? `<span class="muted0">(${r.year})</span>` : ""}</div>
               <div class="line">${r.added ? "Already in your lists" : r.mine.length ? `On ${esc(r.mine.join(", "))}` : `<span class="warnt">Not on your services</span>${r.services.length ? ` · ${esc(r.services.join(", "))}` : ""}`}</div>
@@ -313,7 +329,7 @@ class UpNextPanel extends HTMLElement {
           </div>`).join("")}</div>` : `<div class="muted">No shows found.</div>`) : ""}
         ${p ? `
           <div class="picked">
-            ${p.poster ? `<img class="poster sm" src="${esc(p.poster)}" alt="">` : ""}
+            ${p.poster ? this._posterLink(p.page, `<img class="poster sm" src="${esc(p.poster)}" alt="">`) : ""}
             <div class="info"><div class="name">${esc(p.title)}</div>
             <div class="line">${p.mine.length ? `On ${esc(p.mine.join(", "))}` : `<span class="warnt">Not on your services (yet)</span>`}</div></div>
           </div>
@@ -343,11 +359,13 @@ class UpNextPanel extends HTMLElement {
     root.querySelectorAll("[data-grip]").forEach((g) => g.addEventListener("pointerdown", (ev) => this._dragStart(ev, g)));
     root.querySelectorAll("input[name=ed-mode]").forEach((r) => r.addEventListener("change", () => { this._edit.mode = r.value; this._render(); }));
     root.querySelectorAll("input[name=ed-hold]").forEach((r) => r.addEventListener("change", () => { this._edit.hold = r.value; }));
-    root.querySelectorAll("input[name=ed-vol]").forEach((r) => r.addEventListener("change", () => { this._edit.volume_mode = r.value; this._render(); }));
-    const edVol = root.getElementById("ed-volume");
-    if (edVol) edVol.addEventListener("input", () => {
-      this._edit.volume = edVol.value / 100;
-      root.getElementById("ed-volume-pct").textContent = `${edVol.value}%`;
+    root.querySelectorAll("input[data-vol-on]").forEach((c) => c.addEventListener("change", () => {
+      const v = (this._data.volumes || []).find((x) => x.service === c.dataset.volOn);
+      this._setVolume(c.dataset.volOn, c.checked ? (v?.volume ?? 0.3) : null);
+    }));
+    root.querySelectorAll("input[data-vol]").forEach((r) => {
+      r.addEventListener("input", () => (root.getElementById(`vol-pct-${r.dataset.vol}`).textContent = `${r.value}%`));
+      r.addEventListener("change", () => this._setVolume(r.dataset.vol, r.value / 100));
     });
     const edEp = root.getElementById("ed-ep");
     if (edEp) edEp.addEventListener("change", () => (this._edit.next = edEp.value));
@@ -364,6 +382,7 @@ class UpNextPanel extends HTMLElement {
         setTimeout(() => q.focus(), 0);
       }
     }
+    root.querySelectorAll(".plink").forEach((a) => a.addEventListener("click", (ev) => ev.stopPropagation())); // open, don't pick
     root.querySelectorAll("[data-pick]").forEach((el) =>
       el.addEventListener("click", () => this._pick(this._adding.results[+el.dataset.pick]))
     );
@@ -412,12 +431,6 @@ class UpNextPanel extends HTMLElement {
         if (e.hold && e.hold !== show.hold) {
           await this._ws({ type: "up_next/set_hold", show_id: id, hold: e.hold });
         }
-        const vmode = e.volume_mode ?? show.volume_mode;
-        if (vmode !== show.volume_mode || (vmode === "fixed" && e.volume != null)) {
-          const msg = { type: "up_next/set_volume", show_id: id, mode: vmode };
-          if (vmode === "fixed") msg.volume = e.volume ?? show.volume ?? 0.5;
-          await this._ws(msg);
-        }
         this._closeEditor();
         this._say("Saved");
       } else if (act === "move-list") {
@@ -432,7 +445,7 @@ class UpNextPanel extends HTMLElement {
         }
       } else if (act === "add") {
         const list = el.dataset.list;
-        this._adding = this._adding && this._adding.list === list ? null : { list, query: "", mode: "caught_up", hold: "none" };
+        this._adding = this._adding && this._adding.list === list ? null : { list, query: "", mode: "beginning", hold: "auto" };
         this._render();
       } else if (act === "toggle-break") {
         this._showBreak = !this._showBreak;
@@ -475,7 +488,7 @@ class UpNextPanel extends HTMLElement {
   async _pick(result) {
     if (result.added) return this._say("Already in your lists");
     const a = this._adding;
-    Object.assign(a, { picked: result, mode: "caught_up", hold: "none", episodes: null, next: null });
+    Object.assign(a, { picked: result, mode: "beginning", hold: "auto", episodes: null, next: null });
     this._render();
     try {
       a.episodes = await this._ws({ type: "up_next/episodes", jw_id: result.jw_id });
@@ -620,8 +633,13 @@ const STYLE = `
   .list { display:flex; flex-direction:column; gap:8px; }
   button.link { border:none; background:none; padding:6px 4px; margin-top:6px; color: var(--secondary-text-color); font-size:13px; }
   button.link:hover { color: var(--primary-text-color); }
-  .vol-title { margin-top: 14px; }
-  input[type=range] { vertical-align: middle; width: 140px; }
+  .volbox { background: var(--card-background-color); border:1px solid var(--divider-color); border-radius: 12px; padding: 14px 16px; }
+  .volbox .help { margin: 4px 0 8px; }
+  .vrow { display:flex; align-items:center; gap:12px; padding: 6px 0; flex-wrap: wrap; }
+  .vname { width: 110px; }
+  .vset { display:flex; align-items:center; gap:4px; cursor:pointer; }
+  .vpct { width: 40px; font-variant-numeric: tabular-nums; color: var(--secondary-text-color); }
+  input[type=range] { vertical-align: middle; flex: 1; max-width: 260px; min-width: 120px; }
   .dropzone { border: 1px dashed var(--divider-color); border-radius: 12px; padding: 18px; text-align: center;
               color: var(--secondary-text-color); font-size: 13px; }
   .is-dragging .dropzone { border-color: var(--primary-color); }
@@ -636,6 +654,8 @@ const STYLE = `
   .rank { width: 18px; text-align:center; color: var(--secondary-text-color); font-variant-numeric: tabular-nums; }
   .poster { width: 48px; height: 72px; object-fit: cover; border-radius: 6px; background: rgba(127,127,127,.2); flex: none; }
   .poster.sm { width: 36px; height: 54px; }
+  .plink { display:flex; flex: none; border-radius: 6px; }
+  .plink:hover .poster { outline: 2px solid var(--primary-color); }
   .poster.ph { display:flex; align-items:center; justify-content:center; color: var(--secondary-text-color); }
   .info { flex:1; min-width:0; }
   .name { font-size: 16px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }

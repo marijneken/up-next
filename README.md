@@ -13,7 +13,7 @@ Apple TV, with one button press (or one Alexa routine).
   announced, and then you get a notification.
 - Auto-start: hold a show back and let Up Next start it at the right moment, so
   you never have to wait for the next episode once you've started.
-- Remembers your preferred volume per show.
+- Sets your volume per streaming service, and keeps the sound off while an app starts up.
 - A sidebar panel to manage it all: drag to reorder, add shows, set where you are.
 
 Supported services on the Apple TV: **Apple TV+**, **Prime Video** and **Netflix**

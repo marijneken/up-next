@@ -15,6 +15,7 @@ _LOGGER = logging.getLogger(__name__)
 
 JW_URL = "https://apis.justwatch.com/graphql"
 TVMAZE_URL = "https://api.tvmaze.com"
+JW_SITE = "https://www.justwatch.com"
 TIMEOUT = aiohttp.ClientTimeout(total=25)
 
 # Tracking parameters JustWatch adds to links; dropping them keeps links clean.
@@ -26,7 +27,7 @@ query Search($country: Country!, $searchCountry: Country!, $language: Language!,
     edges { node {
       id objectType
       content(country: $country, language: $language) {
-        title originalReleaseYear externalIds { imdbId } posterUrl
+        title originalReleaseYear externalIds { imdbId } posterUrl fullPath
       }
       offers(country: $country, platform: WEB) {
         monetizationType package { technicalName clearName }
@@ -42,7 +43,7 @@ query Show($id: ID!, $country: Country!, $language: Language!) {
     ... on Show {
       id
       content(country: $country, language: $language) {
-        title externalIds { imdbId } posterUrl
+        title externalIds { imdbId } posterUrl fullPath
       }
       offers(country: $country, platform: WEB) {
         monetizationType standardWebURL package { technicalName clearName }
@@ -82,6 +83,11 @@ def poster_url(path: str | None) -> str | None:
     )
 
 
+def page_url(path: str | None) -> str | None:
+    """JustWatch fullPath -> its web page."""
+    return f"{JW_SITE}{path}" if path else None
+
+
 def clean_url(url: str) -> str:
     """Strip affiliate/tracking parameters from a link."""
     parts = urlsplit(url)
@@ -99,6 +105,7 @@ class SearchResult:
     imdb_id: str | None
     services: dict[str, str]  # technical name -> display name
     poster: str | None = None
+    page: str | None = None  # JustWatch page about the show
 
     @property
     def label(self) -> str:
@@ -138,6 +145,7 @@ class ShowData:
     status: str | None = None  # TVmaze: Running / Ended / ...
     season_sizes: dict[int, int] = field(default_factory=dict)  # planned episodes per season
     poster: str | None = None
+    page: str | None = None  # JustWatch page about the show
 
     @property
     def ended(self) -> bool:
@@ -247,6 +255,7 @@ class Catalog:
                     imdb_id=(content.get("externalIds") or {}).get("imdbId"),
                     services=services,
                     poster=poster_url(content.get("posterUrl")),
+                    page=page_url(content.get("fullPath")),
                 )
             )
         return results
@@ -288,6 +297,7 @@ class Catalog:
             show_links=show_links,
             episodes=sorted(episodes, key=lambda e: e.key),
             poster=poster_url(content.get("posterUrl")),
+            page=page_url(content.get("fullPath")),
         )
         if imdb:
             try:
